@@ -1,5 +1,6 @@
 from isegm.data.datasets.mask import MaskDataset
 from isegm.utils.exp_imports.default import *
+
 MODEL_NAME = 'cocolvis_hrnet18'
 
 
@@ -74,8 +75,17 @@ def train(model, cfg, model_cfg):
     )
     """
 
-    trainset = MaskDataset(dataset_path=cfg.MASK_PATH_TRAIN)
-    valset = MaskDataset(dataset_path=cfg.MASK_PATH_VAL)
+    trainset = MaskDataset(
+        dataset_path=cfg.MASK_PATH_TRAIN,
+        min_object_area=1000,
+        augmentator=train_augmentator,
+        epoch_len=30000,)
+
+    valset = MaskDataset(dataset_path=cfg.MASK_PATH_VAL,
+                         augmentator=val_augmentator,
+                         min_object_area=1000,
+                         points_sampler=points_sampler,
+                         epoch_len=2000)
 
     optimizer_params = {
         'lr': 5e-4, 'betas': (0.9, 0.999), 'eps': 1e-8
