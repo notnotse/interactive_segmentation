@@ -1,4 +1,5 @@
 import os
+import random
 import logging
 from copy import deepcopy
 from collections import defaultdict
@@ -8,11 +9,13 @@ import torch
 import numpy as np
 from tqdm import tqdm
 from torch.utils.data import DataLoader
-from torchvision.transforms import Normalize
 
 from isegm.utils.log import logger, TqdmToLogger, SummaryWriterAvg
 from isegm.utils.vis import draw_probmap, draw_points
 from isegm.utils.misc import save_checkpoint
+from isegm.utils.serialization import get_config_repr
+from isegm.utils.distributed import get_dp_wrapper, get_sampler, reduce_loss_dict
+from .optimizer import get_optimizer
 
 
 class ISTrainer(object):
@@ -27,8 +30,11 @@ class ISTrainer(object):
                  lr_scheduler=None,
                  metrics=None,
                  additional_val_metrics=None,
-                 backbone_lr_mult=0.1,
-                 net_inputs=('images', 'points')):
+                 net_inputs=('images', 'points'),
+                 max_num_next_clicks=0,
+                 click_models=None,
+                 prev_mask_drop_prob=0.0,
+                 ):
         self.cfg = cfg
         self.model_cfg = model_cfg
         self.max_interactive_points = max_interactive_points
@@ -36,6 +42,14 @@ class ISTrainer(object):
         self.val_loss_cfg = deepcopy(loss_cfg)
         self.tb_dump_period = tb_dump_period
         self.net_inputs = net_inputs
+        self.max_num_next_clicks = max_num_next_clicks
+
+        self.click_models = click_models
+        self.prev_mask_drop_prob = prev_mask_drop_prob
+
+        if cfg.distributed:
+            cfg.batch_size //= cfg.ngpus
+            cfg.val_batch_size //= cfg.ngpus
 
         if metrics is None:
             metrics = []
@@ -52,36 +66,34 @@ class ISTrainer(object):
         self.trainset = trainset
         self.valset = valset
 
+        logger.info(f'Dataset of {trainset.get_samples_number()} samples was loaded for training.')
+        logger.info(f'Dataset of {valset.get_samples_number()} samples was loaded for validation.')
+
         self.train_data = DataLoader(
-            trainset, cfg.batch_size, shuffle=True,
+            trainset, cfg.batch_size,
+            sampler=get_sampler(trainset, shuffle=True, distributed=cfg.distributed),
             drop_last=True, pin_memory=True,
             num_workers=cfg.workers
         )
 
         self.val_data = DataLoader(
-            valset, cfg.val_batch_size, shuffle=False,
+            valset, cfg.val_batch_size,
+            sampler=get_sampler(valset, shuffle=False, distributed=cfg.distributed),
             drop_last=True, pin_memory=True,
             num_workers=cfg.workers
         )
 
-        backbone_params, other_params = model.get_trainable_params()
-        opt_params = [
-            {'params': backbone_params, 'lr': backbone_lr_mult * optimizer_params['lr']},
-            {'params': other_params}
-        ]
-        if optimizer.lower() == 'adam':
-            self.optim = torch.optim.Adam(opt_params, **optimizer_params)
-        elif optimizer.lower() == 'adamw':
-            self.optim = torch.optim.AdamW(opt_params, **optimizer_params)
-        elif optimizer.lower() == 'sgd':
-            self.optim = torch.optim.SGD(opt_params, **optimizer_params)
-        else:
-            raise NotImplementedError
+        self.optim = get_optimizer(model, optimizer, optimizer_params)
+        model = self._load_weights(model)
 
         if cfg.multi_gpu:
-            model = _CustomDP(model, device_ids=cfg.gpu_ids, output_device=cfg.gpu_ids[0])
+            model = get_dp_wrapper(cfg.distributed)(model, device_ids=cfg.gpu_ids,
+                                                    output_device=cfg.gpu_ids[0])
 
-        logger.info(model)
+        if self.is_master:
+            logger.info(model)
+            logger.info(get_config_repr(model._config))
+
         self.device = cfg.device
         self.net = model.to(self.device)
         self.lr = optimizer_params['lr']
@@ -93,29 +105,42 @@ class ISTrainer(object):
                     self.lr_scheduler.step()
 
         self.tqdm_out = TqdmToLogger(logger, level=logging.INFO)
-        if cfg.input_normalization:
-            mean = torch.tensor(cfg.input_normalization['mean'], dtype=torch.float32)
-            std = torch.tensor(cfg.input_normalization['std'], dtype=torch.float32)
 
-            self.denormalizator = Normalize((-mean / std), (1.0 / std))
-        else:
-            self.denormalizator = lambda x: x
+        if self.click_models is not None:
+            for click_model in self.click_models:
+                for param in click_model.parameters():
+                    param.requires_grad = False
+                click_model.to(self.device)
+                click_model.eval()
 
-        self._load_weights()
+    def run(self, num_epochs, start_epoch=None, validation=True):
+        if start_epoch is None:
+            start_epoch = self.cfg.start_epoch
+
+        logger.info(f'Starting Epoch: {start_epoch}')
+        logger.info(f'Total Epochs: {num_epochs}')
+        for epoch in range(start_epoch, num_epochs):
+            self.training(epoch)
+            if validation:
+                self.validation(epoch)
 
     def training(self, epoch):
-        if self.sw is None:
+        if self.sw is None and self.is_master:
             self.sw = SummaryWriterAvg(log_dir=str(self.cfg.LOGS_PATH),
                                        flush_secs=10, dump_period=self.tb_dump_period)
 
+        if self.cfg.distributed:
+            self.train_data.sampler.set_epoch(epoch)
+
         log_prefix = 'Train' + self.task_prefix.capitalize()
-        tbar = tqdm(self.train_data, file=self.tqdm_out, ncols=100)
-        train_loss = 0.0
+        tbar = tqdm(self.train_data, file=self.tqdm_out, ncols=100)\
+            if self.is_master else self.train_data
 
         for metric in self.train_metrics:
             metric.reset_epoch_stats()
 
         self.net.train()
+        train_loss = 0.0
         for i, batch_data in enumerate(tbar):
             global_step = epoch * len(self.train_data) + i
 
@@ -126,58 +151,64 @@ class ISTrainer(object):
             loss.backward()
             self.optim.step()
 
-            batch_loss = loss.item()
-            train_loss += batch_loss
+            losses_logging['overall'] = loss
+            reduce_loss_dict(losses_logging)
 
-            for loss_name, loss_values in losses_logging.items():
-                self.sw.add_scalar(tag=f'{log_prefix}Losses/{loss_name}',
-                                   value=np.array(loss_values).mean(),
+            train_loss += losses_logging['overall'].item()
+
+            if self.is_master:
+                for loss_name, loss_value in losses_logging.items():
+                    self.sw.add_scalar(tag=f'{log_prefix}Losses/{loss_name}',
+                                       value=loss_value.item(),
+                                       global_step=global_step)
+
+                for k, v in self.loss_cfg.items():
+                    if '_loss' in k and hasattr(v, 'log_states') and self.loss_cfg.get(k + '_weight', 0.0) > 0:
+                        v.log_states(self.sw, f'{log_prefix}Losses/{k}', global_step)
+
+                if self.image_dump_interval > 0 and global_step % self.image_dump_interval == 0:
+                    self.save_visualization(splitted_batch_data, outputs, global_step, prefix='train')
+
+                self.sw.add_scalar(tag=f'{log_prefix}States/learning_rate',
+                                   value=self.lr if not hasattr(self, 'lr_scheduler') else self.lr_scheduler.get_lr()[-1],
                                    global_step=global_step)
-            self.sw.add_scalar(tag=f'{log_prefix}Losses/overall',
-                               value=batch_loss,
-                               global_step=global_step)
 
-            for k, v in self.loss_cfg.items():
-                if '_loss' in k and hasattr(v, 'log_states') and self.loss_cfg.get(k + '_weight', 0.0) > 0:
-                    v.log_states(self.sw, f'{log_prefix}Losses/{k}', global_step)
+                tbar.set_description(f'Epoch {epoch}, training loss {train_loss/(i+1):.4f}')
+                for metric in self.train_metrics:
+                    metric.log_states(self.sw, f'{log_prefix}Metrics/{metric.name}', global_step)
 
-            if self.image_dump_interval > 0 and global_step % self.image_dump_interval == 0:
-                self.save_visualization(splitted_batch_data, outputs, global_step, prefix='train')
-
-            self.sw.add_scalar(tag=f'{log_prefix}States/learning_rate',
-                               value=self.lr if self.lr_scheduler is None else self.lr_scheduler.get_lr()[-1],
-                               global_step=global_step)
-
-            tbar.set_description(f'Epoch {epoch}, training loss {train_loss/(i+1):.6f}')
+        if self.is_master:
             for metric in self.train_metrics:
-                metric.log_states(self.sw, f'{log_prefix}Metrics/{metric.name}', global_step)
+                self.sw.add_scalar(tag=f'{log_prefix}Metrics/{metric.name}',
+                                   value=metric.get_epoch_value(),
+                                   global_step=epoch, disable_avg=True)
 
-        for metric in self.train_metrics:
-            self.sw.add_scalar(tag=f'{log_prefix}Metrics/{metric.name}',
-                               value=metric.get_epoch_value(),
-                               global_step=epoch, disable_avg=True)
-
-        save_checkpoint(self.net, self.cfg.CHECKPOINTS_PATH, prefix=self.task_prefix,
-                        epoch=None, multi_gpu=self.cfg.multi_gpu)
-        if epoch % self.checkpoint_interval == 0:
             save_checkpoint(self.net, self.cfg.CHECKPOINTS_PATH, prefix=self.task_prefix,
-                            epoch=epoch, multi_gpu=self.cfg.multi_gpu)
+                            epoch=None, multi_gpu=self.cfg.multi_gpu)
 
-        if self.lr_scheduler is not None:
+            if isinstance(self.checkpoint_interval, (list, tuple)):
+                checkpoint_interval = [x for x in self.checkpoint_interval if x[0] <= epoch][-1][1]
+            else:
+                checkpoint_interval = self.checkpoint_interval
+
+            if epoch % checkpoint_interval == 0:
+                save_checkpoint(self.net, self.cfg.CHECKPOINTS_PATH, prefix=self.task_prefix,
+                                epoch=epoch, multi_gpu=self.cfg.multi_gpu)
+
+        if hasattr(self, 'lr_scheduler'):
             self.lr_scheduler.step()
 
     def validation(self, epoch):
-        if self.sw is None:
+        if self.sw is None and self.is_master:
             self.sw = SummaryWriterAvg(log_dir=str(self.cfg.LOGS_PATH),
                                        flush_secs=10, dump_period=self.tb_dump_period)
 
         log_prefix = 'Val' + self.task_prefix.capitalize()
-        tbar = tqdm(self.val_data, file=self.tqdm_out, ncols=100)
+        tbar = tqdm(self.val_data, file=self.tqdm_out, ncols=100) if self.is_master else self.val_data
 
         for metric in self.val_metrics:
             metric.reset_epoch_stats()
 
-        num_batches = 0
         val_loss = 0
         losses_logging = defaultdict(list)
 
@@ -187,48 +218,82 @@ class ISTrainer(object):
             loss, batch_losses_logging, splitted_batch_data, outputs = \
                 self.batch_forward(batch_data, validation=True)
 
-            for loss_name, loss_values in batch_losses_logging.items():
-                losses_logging[loss_name].extend(loss_values)
+            batch_losses_logging['overall'] = loss
+            reduce_loss_dict(batch_losses_logging)
+            for loss_name, loss_value in batch_losses_logging.items():
+                losses_logging[loss_name].append(loss_value.item())
 
-            batch_loss = loss.item()
-            val_loss += batch_loss
-            num_batches += 1
+            val_loss += batch_losses_logging['overall'].item()
 
-            tbar.set_description(f'Epoch {epoch}, validation loss: {val_loss/num_batches:.6f}')
+            if self.is_master:
+                tbar.set_description(f'Epoch {epoch}, validation loss: {val_loss/(i + 1):.4f}')
+                for metric in self.val_metrics:
+                    metric.log_states(self.sw, f'{log_prefix}Metrics/{metric.name}', global_step)
+
+        if self.is_master:
+            for loss_name, loss_values in losses_logging.items():
+                self.sw.add_scalar(tag=f'{log_prefix}Losses/{loss_name}', value=np.array(loss_values).mean(),
+                                   global_step=epoch, disable_avg=True)
+
             for metric in self.val_metrics:
-                metric.log_states(self.sw, f'{log_prefix}Metrics/{metric.name}', global_step)
-
-        for loss_name, loss_values in losses_logging.items():
-            self.sw.add_scalar(tag=f'{log_prefix}Losses/{loss_name}', value=np.array(loss_values).mean(),
-                               global_step=epoch, disable_avg=True)
-
-        for metric in self.val_metrics:
-            self.sw.add_scalar(tag=f'{log_prefix}Metrics/{metric.name}', value=metric.get_epoch_value(),
-                               global_step=epoch, disable_avg=True)
-        self.sw.add_scalar(tag=f'{log_prefix}Losses/overall', value=val_loss / num_batches,
-                           global_step=epoch, disable_avg=True)
+                self.sw.add_scalar(tag=f'{log_prefix}Metrics/{metric.name}', value=metric.get_epoch_value(),
+                                   global_step=epoch, disable_avg=True)
 
     def batch_forward(self, batch_data, validation=False):
-        if 'instances' in batch_data:
-            batch_size, num_points, c, h, w = batch_data['instances'].size()
-            batch_data['instances'] = batch_data['instances'].view(batch_size * num_points, c, h, w)
         metrics = self.val_metrics if validation else self.train_metrics
-        losses_logging = defaultdict(list)
+        losses_logging = dict()
+
         with torch.set_grad_enabled(not validation):
             batch_data = {k: v.to(self.device) for k, v in batch_data.items()}
-            image, points = batch_data['images'], batch_data['points']
+            image, gt_mask, points = batch_data['images'], batch_data['instances'], batch_data['points']
+            orig_image, orig_gt_mask, orig_points = image.clone(), gt_mask.clone(), points.clone()
 
-            output = self.net(image, points)
+            prev_output = torch.zeros_like(image, dtype=torch.float32)[:, :1, :, :]
+
+            last_click_indx = None
+
+            with torch.no_grad():
+                num_iters = random.randint(0, self.max_num_next_clicks)
+
+                for click_indx in range(num_iters):
+                    last_click_indx = click_indx
+
+                    if not validation:
+                        self.net.eval()
+
+                    if self.click_models is None or click_indx >= len(self.click_models):
+                        eval_model = self.net
+                    else:
+                        eval_model = self.click_models[click_indx]
+
+                    net_input = torch.cat((image, prev_output), dim=1) if self.net.with_prev_mask else image
+                    prev_output = torch.sigmoid(eval_model(net_input, points)['instances'])
+
+                    points = get_next_points(prev_output, orig_gt_mask, points, click_indx + 1)
+
+                    if not validation:
+                        self.net.train()
+
+                if self.net.with_prev_mask and self.prev_mask_drop_prob > 0 and last_click_indx is not None:
+                    zero_mask = np.random.random(size=prev_output.size(0)) < self.prev_mask_drop_prob
+                    prev_output[zero_mask] = torch.zeros_like(prev_output[zero_mask])
+
+            batch_data['points'] = points
+
+            net_input = torch.cat((image, prev_output), dim=1) if self.net.with_prev_mask else image
+            output = self.net(net_input, points)
 
             loss = 0.0
             loss = self.add_loss('instance_loss', loss, losses_logging, validation,
                                  lambda: (output['instances'], batch_data['instances']))
             loss = self.add_loss('instance_aux_loss', loss, losses_logging, validation,
                                  lambda: (output['instances_aux'], batch_data['instances']))
-            with torch.no_grad():
-                for m in metrics:
-                    m.update(*(output.get(x) for x in m.pred_outputs),
-                             *(batch_data[x] for x in m.gt_outputs))
+
+            if self.is_master:
+                with torch.no_grad():
+                    for m in metrics:
+                        m.update(*(output.get(x) for x in m.pred_outputs),
+                                 *(batch_data[x] for x in m.gt_outputs))
         return loss, losses_logging, batch_data, output
 
     def add_loss(self, loss_name, total_loss, losses_logging, validation, lambda_loss_inputs):
@@ -238,7 +303,7 @@ class ISTrainer(object):
             loss_criterion = loss_cfg.get(loss_name)
             loss = loss_criterion(*lambda_loss_inputs())
             loss = torch.mean(loss)
-            losses_logging[loss_name].append(loss.detach().cpu().numpy())
+            losses_logging[loss_name] = loss
             loss = loss_weight * loss
             total_loss = total_loss + loss
 
@@ -261,42 +326,31 @@ class ISTrainer(object):
         points = splitted_batch_data['points']
         instance_masks = splitted_batch_data['instances']
 
-        image_blob, points = images[0], points[0]
-        image = self.denormalizator(image_blob).cpu().numpy() * 255
-        image = image.transpose((1, 2, 0))
-
         gt_instance_masks = instance_masks.cpu().numpy()
         predicted_instance_masks = torch.sigmoid(outputs['instances']).detach().cpu().numpy()
-
         points = points.detach().cpu().numpy()
-        if self.max_interactive_points > 0:
-            points = points.reshape((-1, 2 * self.max_interactive_points, 2))
-        else:
-            points = points.reshape((-1, 1, 2))
 
-        num_masks = points.shape[0]
-        gt_masks = np.squeeze(gt_instance_masks[:num_masks], axis=1)
-        predicted_masks = np.squeeze(predicted_instance_masks[:num_masks], axis=1)
+        image_blob, points = images[0], points[0]
+        gt_mask = np.squeeze(gt_instance_masks[0], axis=0)
+        predicted_mask = np.squeeze(predicted_instance_masks[0], axis=0)
 
-        viz_image = []
-        for gt_mask, point, predicted_mask in zip(gt_masks, points, predicted_masks):
-            timage = draw_points(image, point[:max(1, self.max_interactive_points)], (0, 255, 0))
-            if self.max_interactive_points > 0:
-                timage = draw_points(timage, point[self.max_interactive_points:], (0, 0, 255))
+        image = image_blob.cpu().numpy() * 255
+        image = image.transpose((1, 2, 0))
 
-            gt_mask[gt_mask < 0] = 0.25
-            gt_mask = draw_probmap(gt_mask)
-            predicted_mask = draw_probmap(predicted_mask)
-            viz_image.append(np.hstack((timage, gt_mask, predicted_mask)))
-        viz_image = np.vstack(viz_image)
+        image_with_points = draw_points(image, points[:self.max_interactive_points], (0, 255, 0))
+        image_with_points = draw_points(image_with_points, points[self.max_interactive_points:], (0, 0, 255))
 
-        result = viz_image.astype(np.uint8)
-        _save_image('instance_segmentation', result[:, :, ::-1])
+        gt_mask[gt_mask < 0] = 0.25
+        gt_mask = draw_probmap(gt_mask)
+        predicted_mask = draw_probmap(predicted_mask)
+        viz_image = np.hstack((image_with_points, gt_mask, predicted_mask)).astype(np.uint8)
 
-    def _load_weights(self):
+        _save_image('instance_segmentation', viz_image[:, :, ::-1])
+
+    def _load_weights(self, net):
         if self.cfg.weights is not None:
             if os.path.isfile(self.cfg.weights):
-                self.net.load_weights(self.cfg.weights)
+                load_weights(net, self.cfg.weights)
                 self.cfg.weights = None
             else:
                 raise RuntimeError(f"=> no checkpoint found at '{self.cfg.weights}'")
@@ -306,13 +360,54 @@ class ISTrainer(object):
 
             checkpoint_path = checkpoints[0]
             logger.info(f'Load checkpoint from path: {checkpoint_path}')
-            self.net.load_weights(str(checkpoint_path))
-        self.net = self.net.to(self.device)
+            load_weights(net, str(checkpoint_path))
+        return net
+
+    @property
+    def is_master(self):
+        return self.cfg.local_rank == 0
 
 
-class _CustomDP(torch.nn.DataParallel):
-    def __getattr__(self, name):
-        try:
-            return super().__getattr__(name)
-        except AttributeError:
-            return getattr(self.module, name)
+def get_next_points(pred, gt, points, click_indx, pred_thresh=0.49):
+    assert click_indx > 0
+    pred = pred.cpu().numpy()[:, 0, :, :]
+    gt = gt.cpu().numpy()[:, 0, :, :] > 0.5
+
+    fn_mask = np.logical_and(gt, pred < pred_thresh)
+    fp_mask = np.logical_and(np.logical_not(gt), pred > pred_thresh)
+
+    fn_mask = np.pad(fn_mask, ((0, 0), (1, 1), (1, 1)), 'constant').astype(np.uint8)
+    fp_mask = np.pad(fp_mask, ((0, 0), (1, 1), (1, 1)), 'constant').astype(np.uint8)
+    num_points = points.size(1) // 2
+    points = points.clone()
+
+    for bindx in range(fn_mask.shape[0]):
+        fn_mask_dt = cv2.distanceTransform(fn_mask[bindx], cv2.DIST_L2, 5)[1:-1, 1:-1]
+        fp_mask_dt = cv2.distanceTransform(fp_mask[bindx], cv2.DIST_L2, 5)[1:-1, 1:-1]
+
+        fn_max_dist = np.max(fn_mask_dt)
+        fp_max_dist = np.max(fp_mask_dt)
+
+        is_positive = fn_max_dist > fp_max_dist
+        dt = fn_mask_dt if is_positive else fp_mask_dt
+        inner_mask = dt > max(fn_max_dist, fp_max_dist) / 2.0
+        indices = np.argwhere(inner_mask)
+        if len(indices) > 0:
+            coords = indices[np.random.randint(0, len(indices))]
+            if is_positive:
+                points[bindx, num_points - click_indx, 0] = float(coords[0])
+                points[bindx, num_points - click_indx, 1] = float(coords[1])
+                points[bindx, num_points - click_indx, 2] = float(click_indx)
+            else:
+                points[bindx, 2 * num_points - click_indx, 0] = float(coords[0])
+                points[bindx, 2 * num_points - click_indx, 1] = float(coords[1])
+                points[bindx, 2 * num_points - click_indx, 2] = float(click_indx)
+
+    return points
+
+
+def load_weights(model, path_to_weights):
+    current_state_dict = model.state_dict()
+    new_state_dict = torch.load(path_to_weights, map_location='cpu')['state_dict']
+    current_state_dict.update(new_state_dict)
+    model.load_state_dict(current_state_dict)
