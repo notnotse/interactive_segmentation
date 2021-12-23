@@ -4,6 +4,7 @@ import cv2
 import numpy as np
 
 from isegm.data.base import ISDataset
+from isegm.data.sample import DSample
 
 
 class MaskDataset(ISDataset):
@@ -19,7 +20,7 @@ class MaskDataset(ISDataset):
         self.dataset_samples = [x.name for x in sorted(self._images_path.glob('*.*'))]
         self._masks_paths = {x.stem: x for x in self._insts_path.glob('*.*')}
 
-    def get_sample(self, index):
+    def get_sample(self, index) -> DSample:
         image_name = self.dataset_samples[index]
         image_path = str(self._images_path / image_name)
         mask_path = str(self._masks_paths[image_name.split('.')[0]])
@@ -29,16 +30,4 @@ class MaskDataset(ISDataset):
         instances_mask = np.max(cv2.imread(mask_path).astype(np.int32), axis=2)
         instances_mask[instances_mask > 0] = 1
 
-        instances_ids = [1]
-
-        instances_info = {
-            x: {'ignore': False}
-            for x in instances_ids
-        }
-
-        return {
-            'image': image,
-            'instances_mask': instances_mask,
-            'instances_info': instances_info,
-            'image_id': index
-        }
+        return DSample(image, instances_mask, objects_ids=[1], sample_id=index)
