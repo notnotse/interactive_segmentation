@@ -1,5 +1,6 @@
 import torch
 
+from typing import List
 from isegm.inference.clicker import Click
 from isegm.utils.misc import get_bbox_iou, get_bbox_from_mask, expand_bbox, clamp_bbox
 from .base import BaseTransform
@@ -26,7 +27,7 @@ class ZoomIn(BaseTransform):
         self._object_roi = None
         self._roi_image = None
 
-    def transform(self, image_nd, clicks_lists):
+    def transform(self, image_nd, clicks_lists: List[List[Click]]):
         assert image_nd.shape[0] == 1 and len(clicks_lists) == 1
         self.image_changed = False
 
@@ -44,7 +45,10 @@ class ZoomIn(BaseTransform):
                                                     self.expansion_ratio, self.min_crop_size)
 
         if current_object_roi is None:
-            return image_nd, clicks_lists
+            if self.skip_clicks >= 0:
+                return image_nd, clicks_lists
+            else:
+                current_object_roi = 0, image_nd.shape[2] - 1, 0, image_nd.shape[3] - 1
 
         update_object_roi = False
         if self._object_roi is None:
@@ -56,16 +60,14 @@ class ZoomIn(BaseTransform):
 
         if update_object_roi:
             self._object_roi = current_object_roi
-            self._roi_image = get_roi_image_nd(image_nd, self._object_roi, self.target_size)
             self.image_changed = True
+        self._roi_image = get_roi_image_nd(image_nd, self._object_roi, self.target_size)
 
         tclicks_lists = [self._transform_clicks(clicks_list)]
         return self._roi_image.to(image_nd.device), tclicks_lists
 
     def inv_transform(self, prob_map):
-
         if self._object_roi is None:
-            print("self._object_roi is None")
             self._prev_probs = prob_map.cpu().numpy()
             return prob_map
 
@@ -75,17 +77,12 @@ class ZoomIn(BaseTransform):
                                                    mode='bilinear', align_corners=True)
 
         if self._prev_probs is not None:
-            print("self._prev_probs is not None")
-            print("self._prev_probs shape:", self._prev_probs.shape)
             new_prob_map = torch.zeros(*self._prev_probs.shape, device=prob_map.device, dtype=prob_map.dtype)
             new_prob_map[:, :, rmin:rmax + 1, cmin:cmax + 1] = prob_map
         else:
-            print("self._prev_probs is None")
             new_prob_map = prob_map
 
         self._prev_probs = new_prob_map.cpu().numpy()
-
-        print("self._prev_probs", self._prev_probs.shape)
 
         return new_prob_map
 
@@ -127,7 +124,7 @@ class ZoomIn(BaseTransform):
         for click in clicks_list:
             new_r = crop_height * (click.coords[0] - rmin) / (rmax - rmin + 1)
             new_c = crop_width * (click.coords[1] - cmin) / (cmax - cmin + 1)
-            transformed_clicks.append(Click(is_positive=click.is_positive, coords=(new_r, new_c)))
+            transformed_clicks.append(click.copy(coords=(new_r, new_c)))
         return transformed_clicks
 
 

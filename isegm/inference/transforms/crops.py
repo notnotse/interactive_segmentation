@@ -2,6 +2,7 @@ import math
 
 import torch
 import numpy as np
+from typing import List
 
 from isegm.inference.clicker import Click
 from .base import BaseTransform
@@ -17,7 +18,7 @@ class Crops(BaseTransform):
         self.y_offsets = None
         self._counts = None
 
-    def transform(self, image_nd, clicks_lists):
+    def transform(self, image_nd, clicks_lists: List[List[Click]]):
         assert image_nd.shape[0] == 1 and len(clicks_lists) == 1
         image_height, image_width = image_nd.shape[2:4]
         self._counts = None
@@ -42,8 +43,7 @@ class Crops(BaseTransform):
         clicks_lists = []
         for dy in self.y_offsets:
             for dx in self.x_offsets:
-                crop_clicks = [Click(is_positive=x.is_positive, coords=(x.coords[0] - dy, x.coords[1] - dx))
-                               for x in clicks_list]
+                crop_clicks = [x.copy(coords=(x.coords[0] - dy, x.coords[1] - dx)) for x in clicks_list]
                 clicks_lists.append(crop_clicks)
 
         return image_crops, clicks_lists
