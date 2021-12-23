@@ -1,5 +1,3 @@
-from functools import partial
-
 import torch
 import numpy as np
 
@@ -30,12 +28,9 @@ def save_checkpoint(net, checkpoints_path, epoch=None, prefix='', verbose=True, 
     if verbose:
         logger.info(f'Save checkpoint to {str(checkpoint_path)}')
 
-    state_dict = net.module.state_dict() if multi_gpu else net.state_dict()
-    torch.save(state_dict, str(checkpoint_path))
-
-
-def get_unique_labels(mask):
-    return np.nonzero(np.bincount(mask.flatten() + 1))[0] - 1
+    net = net.module if multi_gpu else net
+    torch.save({'state_dict': net.state_dict(),
+                'config': net._config}, str(checkpoint_path))
 
 
 def get_bbox_from_mask(mask):
@@ -82,3 +77,10 @@ def get_segments_iou(s1, s2):
     intersection = max(0, min(b, d) - max(a, c) + 1)
     union = max(1e-6, max(b, d) - min(a, c) + 1)
     return intersection / union
+
+
+def get_labels_with_sizes(x):
+    obj_sizes = np.bincount(x.flatten())
+    labels = np.nonzero(obj_sizes)[0].tolist()
+    labels = [x for x in labels if x != 0]
+    return labels, obj_sizes[labels].tolist()

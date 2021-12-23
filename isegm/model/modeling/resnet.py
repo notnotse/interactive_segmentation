@@ -26,10 +26,14 @@ class ResNetBackbone(torch.nn.Module):
         self.layer3 = pretrained.layer3
         self.layer4 = pretrained.layer4
 
-    def forward(self, x):
+    def forward(self, x, additional_features=None):
         x = self.conv1(x)
         x = self.bn1(x)
         x = self.relu(x)
+        if additional_features is not None:
+            x = x + torch.nn.functional.pad(additional_features,
+                                            [0, 0, 0, 0, 0, x.size(1) - additional_features.size(1)],
+                                            mode='constant', value=0)
         x = self.maxpool(x)
         c1 = self.layer1(x)
         c2 = self.layer2(c1)

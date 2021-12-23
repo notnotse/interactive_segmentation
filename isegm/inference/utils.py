@@ -4,12 +4,8 @@ from pathlib import Path
 import torch
 import numpy as np
 
-from isegm.model.is_deeplab_model import get_deeplab_model
-from isegm.model.is_hrnet_model import get_hrnet_model
-from isegm.data.berkeley import BerkeleyDataset
-from isegm.data.grabcut import GrabCutDataset
-from isegm.data.davis import DavisDataset
-from isegm.data.sbd import SBDEvaluationDataset
+from isegm.data.datasets import GrabCutDataset, BerkeleyDataset, DavisDataset, SBDEvaluationDataset, PascalVocDataset
+from isegm.utils.serialization import load_model
 
 
 def get_time_metrics(all_ious, elapsed_time):
@@ -22,80 +18,25 @@ def get_time_metrics(all_ious, elapsed_time):
     return mean_spc, mean_spi
 
 
-def load_is_model(checkpoint, device, backbone='auto', **kwargs):
+def load_is_model(checkpoint, device, **kwargs):
     if isinstance(checkpoint, (str, Path)):
         state_dict = torch.load(checkpoint, map_location='cpu')
     else:
         state_dict = checkpoint
 
-    if backbone == 'auto':
-        for k in state_dict.keys():
-            if 'feature_extractor.stage2.0.branches' in k:
-                return load_hrnet_is_model(state_dict, device, backbone, **kwargs)
-        return load_deeplab_is_model(state_dict, device, backbone, **kwargs)
-    elif 'resnet' in backbone:
-        return load_deeplab_is_model(state_dict, device, backbone, **kwargs)
-    elif 'hrnet' in backbone:
-        return load_hrnet_is_model(state_dict, device, backbone, **kwargs)
+    if isinstance(state_dict, list):
+        model = load_single_is_model(state_dict[0], device, **kwargs)
+        models = [load_single_is_model(x, device, **kwargs) for x in state_dict]
+
+        return model, models
     else:
-        raise NotImplementedError('Unknown backbone')
+        return load_single_is_model(state_dict, device, **kwargs)
 
 
-def load_hrnet_is_model(state_dict, device, backbone='auto', width=48, ocr_width=256,
-                        small=False, cpu_dist_maps=False, norm_radius=260):
-    if backbone == 'auto':
-        num_fe_weights = len([x for x in state_dict.keys() if 'feature_extractor.' in x])
-        small = num_fe_weights < 1800
+def load_single_is_model(state_dict, device, **kwargs):
+    model = load_model(state_dict['config'], **kwargs)
+    model.load_state_dict(state_dict['state_dict'], strict=False)
 
-        ocr_f_down = [v for k, v in state_dict.items() if 'object_context_block.f_down.1.0.bias' in k]
-        assert len(ocr_f_down) == 1
-        ocr_width = ocr_f_down[0].shape[0]
-
-        s2_conv1_w = [v for k, v in state_dict.items() if 'stage2.0.branches.0.0.conv1.weight' in k]
-        assert  len(s2_conv1_w) == 1
-        width = s2_conv1_w[0].shape[0]
-
-    model = get_hrnet_model(width=width, ocr_width=ocr_width, small=small,
-                            with_aux_output=False, cpu_dist_maps=cpu_dist_maps,
-                            norm_radius=norm_radius)
-
-    model.load_state_dict(state_dict, strict=False)
-    for param in model.parameters():
-        param.requires_grad = False
-    model.to(device)
-    model.eval()
-
-    return model
-
-
-def load_deeplab_is_model(state_dict, device, backbone='auto', deeplab_ch=128, aspp_dropout=0.2,
-                          cpu_dist_maps=False, norm_radius=260):
-    if backbone == 'auto':
-        num_backbone_params = len([x for x in state_dict.keys()
-                                   if 'feature_extractor.backbone' in x and not('num_batches_tracked' in x)])
-
-        if num_backbone_params <= 181:
-            backbone = 'resnet34'
-        elif num_backbone_params <= 276:
-            backbone = 'resnet50'
-        elif num_backbone_params <= 531:
-            backbone = 'resnet101'
-        else:
-            raise NotImplementedError('Unknown backbone')
-
-        if 'aspp_dropout' in state_dict:
-            aspp_dropout = float(state_dict['aspp_dropout'].cpu().numpy())
-        else:
-            aspp_project_weight = [v for k, v in state_dict.items() if 'aspp.project.0.weight' in k][0]
-            deeplab_ch = aspp_project_weight.size(0)
-            if deeplab_ch == 256:
-                aspp_dropout = 0.5
-
-    model = get_deeplab_model(backbone=backbone, deeplab_ch=deeplab_ch,
-                              aspp_dropout=aspp_dropout, cpu_dist_maps=cpu_dist_maps,
-                              norm_radius=norm_radius)
-
-    model.load_state_dict(state_dict, strict=False)
     for param in model.parameters():
         param.requires_grad = False
     model.to(device)
@@ -111,12 +52,14 @@ def get_dataset(dataset_name, cfg):
         dataset = BerkeleyDataset(cfg.BERKELEY_PATH)
     elif dataset_name == 'DAVIS':
         dataset = DavisDataset(cfg.DAVIS_PATH)
-    elif dataset_name == 'COCO_MVal':
-        dataset = DavisDataset(cfg.COCO_MVAL_PATH)
     elif dataset_name == 'SBD':
         dataset = SBDEvaluationDataset(cfg.SBD_PATH)
     elif dataset_name == 'SBD_Train':
         dataset = SBDEvaluationDataset(cfg.SBD_PATH, split='train')
+    elif dataset_name == 'PascalVOC':
+        dataset = PascalVocDataset(cfg.PASCALVOC_PATH, split='test')
+    elif dataset_name == 'COCO_MVal':
+        dataset = DavisDataset(cfg.COCO_MVAL_PATH)
     else:
         dataset = None
 

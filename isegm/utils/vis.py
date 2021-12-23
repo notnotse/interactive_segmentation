@@ -64,7 +64,13 @@ def draw_probmap(x):
 def draw_points(image, points, color, radius=3):
     image = image.copy()
     for p in points:
-        image = cv2.circle(image, (int(p[1]), int(p[0])), radius, color, -1)
+        if p[0] < 0:
+            continue
+        if len(p) == 3:
+            pradius = {0: 8, 1: 6, 2: 4}[p[2]] if p[2] < 3 else 2
+        else:
+            pradius = radius
+        image = cv2.circle(image, (int(p[1]), int(p[0])), pradius, color, -1)
 
     return image
 

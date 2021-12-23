@@ -65,12 +65,12 @@ class DeepLabV3Plus(nn.Module):
         self.inference_mode = True
         self.eval()
 
-    def forward(self, x):
+    def forward(self, x, additional_features=None):
         with ExitStack() as stack:
             if self.inference_mode:
                 stack.enter_context(torch.no_grad())
 
-            c1, _, c3, c4 = self.backbone(x)
+            c1, _, c3, c4 = self.backbone(x, additional_features)
             c1 = self.skip_project(c1)
 
             x = self.aspp(c4)

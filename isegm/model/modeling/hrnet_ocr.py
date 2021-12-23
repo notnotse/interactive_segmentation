@@ -206,35 +206,45 @@ class HighResolutionNet(nn.Module):
             num_blocks=4 * [num_blocks], num_channels=num_channels)
 
         last_inp_channels = np.int(np.sum(pre_stage_channels))
-        ocr_mid_channels = 2 * ocr_width
-        ocr_key_channels = ocr_width
+        if self.ocr_width > 0:
+            ocr_mid_channels = 2 * self.ocr_width
+            ocr_key_channels = self.ocr_width
 
-        self.conv3x3_ocr = nn.Sequential(
-            nn.Conv2d(last_inp_channels, ocr_mid_channels,
-                      kernel_size=3, stride=1, padding=1),
-            norm_layer(ocr_mid_channels),
-            nn.ReLU(inplace=relu_inplace),
-        )
-        self.ocr_gather_head = SpatialGather_Module(num_classes)
+            self.conv3x3_ocr = nn.Sequential(
+                nn.Conv2d(last_inp_channels, ocr_mid_channels,
+                          kernel_size=3, stride=1, padding=1),
+                norm_layer(ocr_mid_channels),
+                nn.ReLU(inplace=relu_inplace),
+            )
+            self.ocr_gather_head = SpatialGather_Module(num_classes)
 
-        self.ocr_distri_head = SpatialOCR_Module(in_channels=ocr_mid_channels,
-                                                 key_channels=ocr_key_channels,
-                                                 out_channels=ocr_mid_channels,
-                                                 scale=1,
-                                                 dropout=0.05,
-                                                 norm_layer=norm_layer,
-                                                 align_corners=align_corners)
-        self.cls_head = nn.Conv2d(
-            ocr_mid_channels, num_classes, kernel_size=1, stride=1, padding=0, bias=True)
+            self.ocr_distri_head = SpatialOCR_Module(in_channels=ocr_mid_channels,
+                                                     key_channels=ocr_key_channels,
+                                                     out_channels=ocr_mid_channels,
+                                                     scale=1,
+                                                     dropout=0.05,
+                                                     norm_layer=norm_layer,
+                                                     align_corners=align_corners)
+            self.cls_head = nn.Conv2d(
+                ocr_mid_channels, num_classes, kernel_size=1, stride=1, padding=0, bias=True)
 
-        self.aux_head = nn.Sequential(
-            nn.Conv2d(last_inp_channels, last_inp_channels,
-                      kernel_size=1, stride=1, padding=0),
-            norm_layer(last_inp_channels),
-            nn.ReLU(inplace=relu_inplace),
-            nn.Conv2d(last_inp_channels, num_classes,
-                      kernel_size=1, stride=1, padding=0, bias=True)
-        )
+            self.aux_head = nn.Sequential(
+                nn.Conv2d(last_inp_channels, last_inp_channels,
+                          kernel_size=1, stride=1, padding=0),
+                norm_layer(last_inp_channels),
+                nn.ReLU(inplace=relu_inplace),
+                nn.Conv2d(last_inp_channels, num_classes,
+                          kernel_size=1, stride=1, padding=0, bias=True)
+            )
+        else:
+            self.cls_head = nn.Sequential(
+                nn.Conv2d(last_inp_channels, last_inp_channels,
+                          kernel_size=3, stride=1, padding=1),
+                norm_layer(last_inp_channels),
+                nn.ReLU(inplace=relu_inplace),
+                nn.Conv2d(last_inp_channels, num_classes,
+                          kernel_size=1, stride=1, padding=0, bias=True)
+            )
 
     def _make_transition_layer(
             self, num_channels_pre_layer, num_channels_cur_layer):
@@ -315,24 +325,21 @@ class HighResolutionNet(nn.Module):
 
         return nn.Sequential(*modules), num_inchannels
 
-    def forward(self, x):
-        feats = self.compute_hrnet_feats(x)
-        out_aux = self.aux_head(feats)
-        feats = self.conv3x3_ocr(feats)
+    def forward(self, x, additional_features=None):
+        feats = self.compute_hrnet_feats(x, additional_features)
+        if self.ocr_width > 0:
+            out_aux = self.aux_head(feats)
+            feats = self.conv3x3_ocr(feats)
 
-        context = self.ocr_gather_head(feats, out_aux)
-        feats = self.ocr_distri_head(feats, context)
-        out = self.cls_head(feats)
+            context = self.ocr_gather_head(feats, out_aux)
+            feats = self.ocr_distri_head(feats, context)
+            out = self.cls_head(feats)
+            return [out, out_aux]
+        else:
+            return [self.cls_head(feats), None]
 
-        return [out, out_aux]
-
-    def compute_hrnet_feats(self, x):
-        x = self.conv1(x)
-        x = self.bn1(x)
-        x = self.relu(x)
-        x = self.conv2(x)
-        x = self.bn2(x)
-        x = self.relu(x)
+    def compute_hrnet_feats(self, x, additional_features):
+        x = self.compute_pre_stage_features(x, additional_features)
         x = self.layer1(x)
 
         x_list = []
@@ -365,6 +372,19 @@ class HighResolutionNet(nn.Module):
                 x_list.append(y_list[i])
         x = self.stage4(x_list)
 
+        return self.aggregate_hrnet_features(x)
+
+    def compute_pre_stage_features(self, x, additional_features):
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        if additional_features is not None:
+            x = x + additional_features
+        x = self.conv2(x)
+        x = self.bn2(x)
+        return self.relu(x)
+
+    def aggregate_hrnet_features(self, x):
         # Upsampling
         x0_h, x0_w = x[0].size(2), x[0].size(3)
         x1 = F.interpolate(x[1], size=(x0_h, x0_w),
@@ -388,9 +408,6 @@ class HighResolutionNet(nn.Module):
         pretrained_dict = torch.load(pretrained_path, map_location={'cuda:0': 'cpu'})
         pretrained_dict = {k.replace('last_layer', 'aux_head').replace('model.', ''): v for k, v in
                            pretrained_dict.items()}
-
-        print('model_dict-pretrained_dict:', sorted(list(set(model_dict) - set(pretrained_dict))))
-        print('pretrained_dict-model_dict:', sorted(list(set(pretrained_dict) - set(model_dict))))
 
         pretrained_dict = {k: v for k, v in pretrained_dict.items()
                            if k in model_dict.keys()}

@@ -10,17 +10,26 @@ import torch
 from easydict import EasyDict as edict
 
 from .log import logger, add_logging
+from .distributed import synchronize, get_world_size
 
 
-def init_experiment(args):
+def init_experiment(args, model_name):
     model_path = Path(args.model_path)
-    ftree = get_model_family_tree(model_path)
+    ftree = get_model_family_tree(model_path, model_name=model_name)
+
     if ftree is None:
         print('Models can only be located in the "models" directory in the root of the repository')
         sys.exit(1)
 
     cfg = load_config(model_path)
     update_config(cfg, args)
+
+    cfg.distributed = args.distributed
+    cfg.local_rank = args.local_rank
+    if cfg.distributed:
+        torch.distributed.init_process_group(backend='nccl', init_method='env://')
+        if args.workers > 0:
+            torch.multiprocessing.set_start_method('forkserver', force=True)
 
     experiments_path = Path(cfg.EXPS_PATH)
     exp_parent_path = experiments_path / '/'.join(ftree)
@@ -34,46 +43,65 @@ def init_experiment(args):
         if cfg.exp_name:
             exp_name += '_' + cfg.exp_name
         exp_path = exp_parent_path / exp_name
-        exp_path.mkdir(parents=True)
+        synchronize()
+        if cfg.local_rank == 0:
+            exp_path.mkdir(parents=True)
 
     cfg.EXP_PATH = exp_path
     cfg.CHECKPOINTS_PATH = exp_path / 'checkpoints'
     cfg.VIS_PATH = exp_path / 'vis'
     cfg.LOGS_PATH = exp_path / 'logs'
 
-    cfg.LOGS_PATH.mkdir(exist_ok=True)
-    cfg.CHECKPOINTS_PATH.mkdir(exist_ok=True)
-    cfg.VIS_PATH.mkdir(exist_ok=True)
+    if cfg.local_rank == 0:
+        cfg.LOGS_PATH.mkdir(exist_ok=True)
+        cfg.CHECKPOINTS_PATH.mkdir(exist_ok=True)
+        cfg.VIS_PATH.mkdir(exist_ok=True)
 
-    dst_script_path = exp_path / (model_path.stem + datetime.strftime(datetime.today(), '_%Y-%m-%d-%H-%M-%S.py'))
-    shutil.copy(model_path, dst_script_path)
+        dst_script_path = exp_path / (model_path.stem + datetime.strftime(datetime.today(), '_%Y-%m-%d-%H-%M-%S.py'))
+        if args.temp_model_path:
+            shutil.copy(args.temp_model_path, dst_script_path)
+            os.remove(args.temp_model_path)
+        else:
+            shutil.copy(model_path, dst_script_path)
+
+    synchronize()
 
     if cfg.gpus != '':
         gpu_ids = [int(id) for id in cfg.gpus.split(',')]
     else:
-        gpu_ids = list(range(cfg.ngpus))
+        gpu_ids = list(range(max(cfg.ngpus, get_world_size())))
         cfg.gpus = ','.join([str(id) for id in gpu_ids])
+
     cfg.gpu_ids = gpu_ids
     cfg.ngpus = len(gpu_ids)
     cfg.multi_gpu = cfg.ngpus > 1
 
-    if cfg.multi_gpu:
-        os.environ['CUDA_VISIBLE_DEVICES'] = cfg.gpus
-        ngpus = torch.cuda.device_count()
-        assert ngpus == cfg.ngpus
-    cfg.device = torch.device(f'cuda:{cfg.gpu_ids[0]}')
+    if cfg.distributed:
+        cfg.device = torch.device('cuda')
+        cfg.gpu_ids = [cfg.gpu_ids[cfg.local_rank]]
+        torch.cuda.set_device(cfg.gpu_ids[0])
+    else:
+        if cfg.multi_gpu:
+            os.environ['CUDA_VISIBLE_DEVICES'] = cfg.gpus
+            ngpus = torch.cuda.device_count()
+            assert ngpus == cfg.ngpus
+        cfg.device = torch.device(f'cuda:{cfg.gpu_ids[0]}')
 
-    add_logging(cfg.LOGS_PATH, prefix='train_')
+    if cfg.local_rank == 0:
+        add_logging(cfg.LOGS_PATH, prefix='train_')
+        logger.info(f'Number of GPUs: {cfg.ngpus}')
+        if cfg.distributed:
+            logger.info(f'Multi-Process Multi-GPU Distributed Training')
 
-    logger.info(f'Number of GPUs: {len(cfg.gpu_ids)}')
-    logger.info('Run experiment with config:')
-    logger.info(pprint.pformat(cfg, indent=4))
+        logger.info('Run experiment with config:')
+        logger.info(pprint.pformat(cfg, indent=4))
 
     return cfg
 
 
-def get_model_family_tree(model_path, terminate_name='models'):
-    model_name = model_path.stem
+def get_model_family_tree(model_path, terminate_name='models', model_name=None):
+    if model_name is None:
+        model_name = model_path.stem
     family_tree = [model_name]
     for x in model_path.parents:
         if x.stem == terminate_name:
