@@ -4,7 +4,6 @@ import numpy as np
 from scipy.optimize import fmin_l_bfgs_b
 
 from .base import BasePredictor
-from isegm.model.is_hrnet_model import DistMapsHRNetModel
 
 
 class BRSBasePredictor(BasePredictor):
@@ -16,8 +15,8 @@ class BRSBasePredictor(BasePredictor):
         self.opt_data = None
         self.input_data = None
 
-    def set_input_image(self, image_nd):
-        super().set_input_image(image_nd)
+    def set_input_image(self, image):
+        super().set_input_image(image)
         self.opt_data = None
         self.input_data = None
 
@@ -120,10 +119,18 @@ class FeatureBRSPredictor(BRSBasePredictor):
 
     def _get_head_input(self, image_nd, points):
         with torch.no_grad():
-            coord_features = self.net.dist_maps(image_nd, points)
-            x = self.net.rgb_conv(torch.cat((image_nd, coord_features), dim=1))
+            image_nd, prev_mask = self.net.prepare_input(image_nd)
+            coord_features = self.net.get_coord_features(image_nd, prev_mask, points)
+
+            if self.net.rgb_conv is not None:
+                x = self.net.rgb_conv(torch.cat((image_nd, coord_features), dim=1))
+                additional_features = None
+            elif hasattr(self.net, 'maps_transform'):
+                x = image_nd
+                additional_features = self.net.maps_transform(coord_features)
+
             if self.insertion_mode == 'after_c4' or self.insertion_mode == 'after_aspp':
-                c1, _, c3, c4 = self.net.feature_extractor.backbone(x)
+                c1, _, c3, c4 = self.net.feature_extractor.backbone(x, additional_features)
                 c1 = self.net.feature_extractor.skip_project(c1)
 
                 if self.insertion_mode == 'after_aspp':
@@ -135,7 +142,7 @@ class FeatureBRSPredictor(BRSBasePredictor):
                     backbone_features = c4
                     self._c1_features = c1
             else:
-                backbone_features = self.net.feature_extractor(x)[0]
+                backbone_features = self.net.feature_extractor(x, additional_features)[0]
 
         return backbone_features
 
@@ -159,8 +166,6 @@ class HRNetFeatureBRSPredictor(BRSBasePredictor):
         num_clicks = len(clicks_lists[0])
         bs = image_nd.shape[0] // 2 if self.with_flip else image_nd.shape[0]
 
-        print("HRNetFeatureBRSPredictor", bs)
-
         if self.opt_data is None or self.opt_data.shape[0] // (2 * self.num_channels) != bs:
             self.opt_data = np.zeros((bs * 2 * self.num_channels), dtype=np.float32)
 
@@ -177,11 +182,14 @@ class HRNetFeatureBRSPredictor(BRSBasePredictor):
             scaled_backbone_features = self.input_data * scale
             scaled_backbone_features = scaled_backbone_features + bias
             if self.insertion_mode == 'A':
-                out_aux = self.net.feature_extractor.aux_head(scaled_backbone_features)
-                feats = self.net.feature_extractor.conv3x3_ocr(scaled_backbone_features)
+                if self.net.feature_extractor.ocr_width > 0:
+                    out_aux = self.net.feature_extractor.aux_head(scaled_backbone_features)
+                    feats = self.net.feature_extractor.conv3x3_ocr(scaled_backbone_features)
 
-                context = self.net.feature_extractor.ocr_gather_head(feats, out_aux)
-                feats = self.net.feature_extractor.ocr_distri_head(feats, context)
+                    context = self.net.feature_extractor.ocr_gather_head(feats, out_aux)
+                    feats = self.net.feature_extractor.ocr_distri_head(feats, context)
+                else:
+                    feats = scaled_backbone_features
                 pred_logits = self.net.feature_extractor.cls_head(feats)
             elif self.insertion_mode == 'C':
                 pred_logits = self.net.feature_extractor.cls_head(scaled_backbone_features)
@@ -210,9 +218,18 @@ class HRNetFeatureBRSPredictor(BRSBasePredictor):
 
     def _get_head_input(self, image_nd, points):
         with torch.no_grad():
-            coord_features = self.net.dist_maps(image_nd, points)
-            x = self.net.rgb_conv(torch.cat((image_nd, coord_features), dim=1))
-            feats = self.net.feature_extractor.compute_hrnet_feats(x)
+            image_nd, prev_mask = self.net.prepare_input(image_nd)
+            coord_features = self.net.get_coord_features(image_nd, prev_mask, points)
+
+            if self.net.rgb_conv is not None:
+                x = self.net.rgb_conv(torch.cat((image_nd, coord_features), dim=1))
+                additional_features = None
+            elif hasattr(self.net, 'maps_transform'):
+                x = image_nd
+                additional_features = self.net.maps_transform(coord_features)
+
+            feats = self.net.feature_extractor.compute_hrnet_feats(x, additional_features)
+
             if self.insertion_mode == 'A':
                 backbone_features = feats
             elif self.insertion_mode == 'C':
@@ -237,31 +254,37 @@ class InputBRSPredictor(BRSBasePredictor):
         pos_mask, neg_mask = self._get_clicks_maps_nd(clicks_lists, image_nd.shape[2:])
         num_clicks = len(clicks_lists[0])
 
-        print("InputBRSPredictor")
         if self.opt_data is None or is_image_changed:
-            opt_channels = 2 if self.optimize_target == 'dmaps' else 3
+            if self.optimize_target == 'dmaps':
+                opt_channels = self.net.coord_feature_ch - 1 if self.net.with_prev_mask else self.net.coord_feature_ch
+            else:
+                opt_channels = 3
             bs = image_nd.shape[0] // 2 if self.with_flip else image_nd.shape[0]
             self.opt_data = torch.zeros((bs, opt_channels, image_nd.shape[2], image_nd.shape[3]),
                                         device=self.device, dtype=torch.float32)
-            print("InputBRSPredictor", bs)
 
         def get_prediction_logits(opt_bias):
-            input_image = image_nd
+            input_image, prev_mask = self.net.prepare_input(image_nd)
+            dmaps = self.net.get_coord_features(input_image, prev_mask, points_nd)
+
             if self.optimize_target == 'rgb':
                 input_image = input_image + opt_bias
-            dmaps = self.net.dist_maps(input_image, points_nd)
-            if self.optimize_target == 'dmaps':
-                dmaps = dmaps + opt_bias
+            elif self.optimize_target == 'dmaps':
+                if self.net.with_prev_mask:
+                    dmaps[:, 1:, :, :] = dmaps[:, 1:, :, :] + opt_bias
+                else:
+                    dmaps = dmaps + opt_bias
 
-            x = self.net.rgb_conv(torch.cat((input_image, dmaps), dim=1))
-            if self.optimize_target == 'all':
-                x = x + opt_bias
+            if self.net.rgb_conv is not None:
+                x = self.net.rgb_conv(torch.cat((input_image, dmaps), dim=1))
+                if self.optimize_target == 'all':
+                    x = x + opt_bias
+                coord_features = None
+            elif hasattr(self.net, 'maps_transform'):
+                x = input_image
+                coord_features = self.net.maps_transform(dmaps)
 
-            if isinstance(self.net, DistMapsHRNetModel):
-                pred_logits = self.net.feature_extractor(x)[0]
-            else:
-                backbone_features = self.net.feature_extractor(x)
-                pred_logits = self.net.head(backbone_features[0])
+            pred_logits = self.net.backbone_forward(x, coord_features=coord_features)['instances']
             pred_logits = F.interpolate(pred_logits, size=image_nd.size()[2:], mode='bilinear', align_corners=True)
 
             return pred_logits

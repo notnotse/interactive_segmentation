@@ -2,8 +2,8 @@ import torch
 from torch.nn.functional import interpolate
 
 from isegm.inference.clicker import Click
-from isegm.utils.misc import get_bbox_iou, get_bbox_from_mask, expand_bbox, clamp_bbox
 from .base import BaseTransform
+from ...utils.misc import get_bbox_from_mask, expand_bbox, clamp_bbox
 
 
 class ZoomOut(BaseTransform):
@@ -59,6 +59,7 @@ class ZoomOut(BaseTransform):
         return self._roi_image.to(image_nd.device), tclicks_lists
 
     def inv_transform(self, prob_map):
+        print("inv_transform - ZOOM OUT")
 
         if self._object_roi is None:
             self._prev_probs = prob_map.cpu().numpy()
@@ -75,7 +76,6 @@ class ZoomOut(BaseTransform):
         new_prob_map[:, :, rmin:rmax + 1, cmin:cmax + 1] = prob_map
 
         self._prev_probs = new_prob_map.cpu().numpy()
-
         return new_prob_map
 
     def get_state(self):
@@ -109,6 +109,21 @@ class ZoomOut(BaseTransform):
         return transformed_clicks
 
 
+def get_object_roi(pred_mask, clicks_list, expansion_ratio, min_crop_size):
+    pred_mask = pred_mask.copy()
+
+    for click in clicks_list:
+        if click.is_positive:
+            pred_mask[int(click.coords[0]), int(click.coords[1])] = 1
+
+    bbox = get_bbox_from_mask(pred_mask)
+    bbox = expand_bbox(bbox, expansion_ratio, min_crop_size)
+    h, w = pred_mask.shape[0], pred_mask.shape[1]
+    bbox = clamp_bbox(bbox, 0, h - 1, 0, w - 1)
+
+    return bbox
+
+
 def get_roi_image_nd(image_nd, object_roi, target_size):
     rmin, rmax, cmin, cmax = object_roi
 
@@ -128,3 +143,14 @@ def get_roi_image_nd(image_nd, object_roi, target_size):
                                                        align_corners=True)
 
     return roi_image_nd
+
+
+def check_object_roi(object_roi, clicks_list):
+    for click in clicks_list:
+        if click.is_positive:
+            if click.coords[0] < object_roi[0] or click.coords[0] >= object_roi[1]:
+                return False
+            if click.coords[1] < object_roi[2] or click.coords[1] >= object_roi[3]:
+                return False
+
+    return True

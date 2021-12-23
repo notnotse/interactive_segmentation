@@ -1,3 +1,4 @@
+import os
 import argparse
 import importlib.util
 
@@ -7,11 +8,19 @@ from isegm.utils.exp import init_experiment
 
 def main():
     args = parse_args()
-    model_script = load_module(args.model_path)
+    if args.temp_model_path:
+        model_script = load_module(args.temp_model_path)
+    else:
+        model_script = load_module(args.model_path)
 
-    cfg = init_experiment(args)
+    model_base_name = getattr(model_script, 'MODEL_NAME', None)
+
+    args.distributed = 'WORLD_SIZE' in os.environ
+    cfg = init_experiment(args, model_base_name)
+
     torch.backends.cudnn.benchmark = True
     torch.multiprocessing.set_sharing_strategy('file_system')
+
     model_script.main(cfg)
 
 
@@ -52,6 +61,11 @@ def parse_args():
 
     parser.add_argument('--weights', type=str, default=None,
                         help='Model weights will be loaded from the specified path if you use this argument.')
+
+    parser.add_argument('--temp-model-path', type=str, default='',
+                        help='Do not use this argument (for internal purposes).')
+
+    parser.add_argument("--local_rank", type=int, default=0)
 
     return parser.parse_args()
 
