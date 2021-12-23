@@ -1,6 +1,6 @@
 import torch
 import numpy as np
-from torchvision import transforms
+from tkinter import messagebox
 
 from isegm.inference import clicker
 from isegm.inference.predictors import get_predictor
@@ -9,16 +9,16 @@ from isegm.utils.vis import draw_with_blend_and_clicks
 
 class InteractiveController:
     def __init__(self, net, device, predictor_params, update_image_callback, prob_thresh=0.5):
-        self.net = net.to(device)
+        self.net = net
         self.prob_thresh = prob_thresh
         self.clicker = clicker.Clicker()
         self.states = []
         self.probs_history = []
         self.object_count = 0
         self._result_mask = None
+        self._init_mask = None
 
         self.image = None
-        self.image_nd = None
         self.predictor = None
         self.device = device
         self.update_image_callback = update_image_callback
@@ -26,17 +26,24 @@ class InteractiveController:
         self.reset_predictor()
 
     def set_image(self, image):
-        input_transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize([.485, .456, .406], [.229, .224, .225])
-        ])
-
         self.image = image
-        self.image_nd = input_transform(image).to(self.device)
         self._result_mask = np.zeros(image.shape[:2], dtype=np.uint16)
         self.object_count = 0
         self.reset_last_object(update_image=False)
         self.update_image_callback(reset_canvas=True)
+
+    def set_mask(self, mask):
+        if self.image.shape[:2] != mask.shape[:2]:
+            messagebox.showwarning("Warning", "A segmentation mask must have the same sizes as the current image!")
+            return
+
+        if len(self.probs_history) > 0:
+            self.reset_last_object()
+
+        self._init_mask = mask.astype(np.float32)
+        self.probs_history.append((np.zeros_like(self._init_mask), self._init_mask))
+        self._init_mask = torch.tensor(self._init_mask, device=self.device).unsqueeze(0).unsqueeze(0)
+        self.clicker.click_indx_offset = 1
 
     def add_click(self, x, y, is_positive):
         self.states.append({
@@ -46,7 +53,10 @@ class InteractiveController:
 
         click = clicker.Click(is_positive=is_positive, coords=(y, x))
         self.clicker.add_click(click)
-        pred = self.predictor.get_prediction(self.clicker)
+        pred = self.predictor.get_prediction(self.clicker, prev_mask=self._init_mask)
+        if self._init_mask is not None and len(self.clicker) == 1:
+            pred = self.predictor.get_prediction(self.clicker, prev_mask=self._init_mask)
+
         torch.cuda.empty_cache()
 
         if self.probs_history:
@@ -64,6 +74,8 @@ class InteractiveController:
         self.clicker.set_state(prev_state['clicker'])
         self.predictor.set_states(prev_state['predictor'])
         self.probs_history.pop()
+        if not self.probs_history:
+            self.reset_init_mask()
         self.update_image_callback()
 
     def partially_finish_object(self):
@@ -76,16 +88,15 @@ class InteractiveController:
 
         self.clicker.reset_clicks()
         self.reset_predictor()
+        self.reset_init_mask()
         self.update_image_callback()
 
     def finish_object(self):
-        object_prob = self.current_object_prob
-        if object_prob is None:
+        if self.current_object_prob is None:
             return
 
+        self._result_mask = self.result_mask
         self.object_count += 1
-        object_mask = object_prob > self.prob_thresh
-        self._result_mask[object_mask] = self.object_count
         self.reset_last_object()
 
     def reset_last_object(self, update_image=True):
@@ -93,6 +104,7 @@ class InteractiveController:
         self.probs_history = []
         self.clicker.reset_clicks()
         self.reset_predictor()
+        self.reset_init_mask()
         if update_image:
             self.update_image_callback()
 
@@ -101,8 +113,12 @@ class InteractiveController:
             self.predictor_params = predictor_params
         self.predictor = get_predictor(self.net, device=self.device,
                                        **self.predictor_params)
-        if self.image_nd is not None:
-            self.predictor.set_input_image(self.image_nd)
+        if self.image is not None:
+            self.predictor.set_input_image(self.image)
+
+    def reset_init_mask(self):
+        self._init_mask = None
+        self.clicker.click_indx_offset = 0
 
     @property
     def current_object_prob(self):
@@ -118,16 +134,16 @@ class InteractiveController:
 
     @property
     def result_mask(self):
-        return self._result_mask.copy()
+        result_mask = self._result_mask.copy()
+        if self.probs_history:
+            result_mask[self.current_object_prob > self.prob_thresh] = self.object_count + 1
+        return result_mask
 
     def get_visualization(self, alpha_blend, click_radius):
         if self.image is None:
             return None
 
         results_mask_for_vis = self.result_mask
-        if self.probs_history:
-            results_mask_for_vis[self.current_object_prob > self.prob_thresh] = self.object_count + 1
-
         vis = draw_with_blend_and_clicks(self.image, mask=results_mask_for_vis, alpha=alpha_blend,
                                          clicks_list=self.clicker.clicks_list, radius=click_radius)
         if self.probs_history:
