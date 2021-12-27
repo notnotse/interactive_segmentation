@@ -3,9 +3,10 @@ import argparse
 import multiprocessing as mp
 from pathlib import Path
 
+from isegm.data.datasets import openimages, ade20k, coco_lvis
+
 sys.path.insert(0, '.')
 from isegm.utils.exp import load_config_file
-from scripts.annotations_conversion import openimages, ade20k, coco_lvis
 
 
 def parse_args():
