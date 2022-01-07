@@ -76,11 +76,13 @@ def train(model, cfg, model_cfg):
     trainset = MaskDataset(
         dataset_path=cfg.MASK_PATH_TRAIN,
         min_object_area=500,
+        epoch_len=5000,
         points_sampler=points_sampler,
         augmentator=train_augmentator)
 
     valset = MaskDataset(dataset_path=cfg.MASK_PATH_VAL,
                          min_object_area=500,
+                         epoch_len=5000,
                          points_sampler=points_sampler)
 
     optimizer_params = {
