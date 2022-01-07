@@ -38,19 +38,29 @@ class InteractiveDemoApp(ttk.Frame):
         master.bind('<space>', lambda event: self.controller.finish_object())
         master.bind('a', lambda event: self.controller.partially_finish_object())
 
-        self.state['zoomin_params']['skip_clicks'].trace(mode='w', callback=self._reset_predictor)
+        #self.state['zoomin_params']['skip_clicks'].trace(mode='w', callback=self._reset_predictor)
         self.state['zoomin_params']['target_size'].trace(mode='w', callback=self._reset_predictor)
         self.state['zoomin_params']['expansion_ratio'].trace(mode='w', callback=self._reset_predictor)
         self.state['predictor_params']['net_clicks_limit'].trace(mode='w', callback=self._change_brs_mode)
         self.state['lbfgs_max_iters'].trace(mode='w', callback=self._change_brs_mode)
         self._change_brs_mode()
 
+        self.load_img()
+
+    def load_img(self):
+        # TODO: ADDING TO LOAD IMG
+
+        filename = "C:/Users/Jonas/Desktop/bild2.jpg"
+        image = cv2.cvtColor(cv2.imread(filename), cv2.COLOR_BGR2RGB)
+        self.controller.set_image(image)
+        self.save_mask_btn.configure(state=tk.NORMAL)
+        self.load_mask_btn.configure(state=tk.NORMAL)
+
     def _init_state(self):
         self.state = {
             'zoomin_params': {
                 'use_zoom_in': tk.BooleanVar(value=True),
                 'fixed_crop': tk.BooleanVar(value=True),
-                'skip_clicks': tk.IntVar(value=-1),
                 'target_size': tk.IntVar(value=min(400, self.limit_longest_size)),
                 'expansion_ratio': tk.DoubleVar(value=1.4)
             },
@@ -125,9 +135,6 @@ class InteractiveDemoApp(ttk.Frame):
         tk.Label(self.zoomin_options_frame, text="Skip clicks").grid(row=0, column=1, pady=1, sticky='e')
         tk.Label(self.zoomin_options_frame, text="Target size").grid(row=1, column=1, pady=1, sticky='e')
         tk.Label(self.zoomin_options_frame, text="Expand ratio").grid(row=2, column=1, pady=1, sticky='e')
-        BoundedNumericalEntry(self.zoomin_options_frame, variable=self.state['zoomin_params']['skip_clicks'],
-                              min_value=-1, max_value=None, vartype=int,
-                              name='zoom_in_skip_clicks').grid(row=0, column=2, padx=10, pady=1, sticky='w')
         BoundedNumericalEntry(self.zoomin_options_frame, variable=self.state['zoomin_params']['target_size'],
                               min_value=100, max_value=self.limit_longest_size, vartype=int,
                               name='zoom_in_target_size').grid(row=1, column=2, padx=10, pady=1, sticky='w')
@@ -179,6 +186,8 @@ class InteractiveDemoApp(ttk.Frame):
                 ("Images", "*.jpg *.jpeg *.png *.bmp *.tiff"),
                 ("All files", "*.*"),
             ], title="Chose an image")
+
+
 
             if len(filename) > 0:
                 image = cv2.cvtColor(cv2.imread(filename), cv2.COLOR_BGR2RGB)
@@ -277,7 +286,6 @@ class InteractiveDemoApp(ttk.Frame):
 
         if self.state['zoomin_params']['use_zoom_in'].get():
             zoomin_params = {
-                'skip_clicks': self.state['zoomin_params']['skip_clicks'].get(),
                 'target_size': self.state['zoomin_params']['target_size'].get(),
                 'expansion_ratio': self.state['zoomin_params']['expansion_ratio'].get()
             }
@@ -312,12 +320,13 @@ class InteractiveDemoApp(ttk.Frame):
     def _update_image(self, reset_canvas=False):
         image = self.controller.get_visualization(alpha_blend=self.state['alpha_blend'].get(),
                                                   click_radius=self.state['click_radius'].get())
-        if self.image_on_canvas is None:
+
+        if self.image_on_canvas is None: # TODO: Called on init.
             self.image_on_canvas = CanvasImage(self.canvas_frame, self.canvas)
             self.image_on_canvas.register_click_callback(self._click_callback)
 
         self._set_click_dependent_widgets_state()
-        if image is not None:
+        if image is not None: # TODO: Happens after image is init. - every time after init.
             self.image_on_canvas.reload_image(Image.fromarray(image), reset_canvas)
 
     def _set_click_dependent_widgets_state(self):

@@ -8,8 +8,8 @@ from isegm.inference.predictors import get_predictor
 from isegm.utils.vis import draw_with_blend_and_clicks
 
 
-class InteractiveController:
-    def __init__(self, net, device, predictor_params, update_image_callback, prob_thresh=0.5):
+class ImageController:
+    def __init__(self, net, device, predictor_params, prob_thresh=0.5):
         self.net = net
         self.prob_thresh = prob_thresh
         self.clicker = clicker.Clicker()
@@ -23,7 +23,6 @@ class InteractiveController:
         self.image_shape = None
         self.predictor = None
         self.device = device
-        self.update_image_callback = update_image_callback
         self.predictor_params = predictor_params
         self.reset_predictor()
 
@@ -33,7 +32,6 @@ class InteractiveController:
         self.image_shape = image.shape[:2]
         self.object_count = 0
         self.reset_last_object(update_image=False)
-        self.update_image_callback(reset_canvas=True)
 
     def get_img_zero_mask(self):
         return np.zeros(self.image_shape, dtype=np.uint16)
@@ -59,22 +57,12 @@ class InteractiveController:
 
         click = clicker.Click(is_positive=is_positive, coords=(y, x))
         self.clicker.add_click(click)
-        # TODO: self._init_mask seems to be always None.
-        pred = self.predictor.get_prediction(self.clicker, prev_mask=self._init_mask)
 
-        #result_frame = np.zeros(self.image_shape)
-        #left, top = pred_location
-        #result_frame[top:top+pred.shape[0], left:left+pred.shape[1]] = pred
-        #pred = result_frame
-        #for i, a in enumerate(result_frame):
-        #    if str(np.average(a)) != "0.0":
-        #        print(i, np.average(a), " of ", len(pred))
+        pred = self.predictor.get_prediction(self.clicker, prev_mask=self._init_mask)
 
         if self._init_mask is not None and len(self.clicker) == 1:
             print("self._init_mask is not None and len(self.clicker) == 1:")
             pred = self.predictor.get_prediction(self.clicker, prev_mask=self._init_mask)
-
-        # TODO: print(pred.shape) - 1500 x 1500 No objids, just a lot of numbers.
 
         torch.cuda.empty_cache()
 
@@ -83,7 +71,7 @@ class InteractiveController:
         else:
             self.probs_history.append((np.zeros_like(pred), pred))
 
-        self.update_image_callback()
+        return self.get_visualization()
 
     def undo_click(self):
         if not self.states:
@@ -95,7 +83,7 @@ class InteractiveController:
         self.probs_history.pop()
         if not self.probs_history:
             self.reset_init_mask()
-        self.update_image_callback()
+        return self.get_visualization()
 
     def partially_finish_object(self):
         object_prob = self.current_object_prob
@@ -108,7 +96,7 @@ class InteractiveController:
         self.clicker.reset_clicks()
         self.reset_predictor()
         self.reset_init_mask()
-        self.update_image_callback()
+        return self.get_visualization()
 
     def finish_object(self):
         if self.current_object_prob is None:
@@ -125,7 +113,7 @@ class InteractiveController:
         self.reset_predictor()
         self.reset_init_mask()
         if update_image:
-            self.update_image_callback()
+            return self.get_visualization()
 
     def reset_predictor(self, predictor_params=None):
         if predictor_params is not None:
@@ -158,12 +146,11 @@ class InteractiveController:
             result_mask[self.current_object_prob > self.prob_thresh] = self.object_count + 1
         return result_mask
 
-    def get_visualization(self, alpha_blend, click_radius):
+    def get_visualization(self, alpha_blend=0.5, click_radius=3):
         if self.image is None:
             return None
 
         results_mask_for_vis = self.result_mask
-        # TODO: results_mask_for_vis 1500x1500 array filled with obj-ids.
 
         vis = draw_with_blend_and_clicks(self.image, mask=results_mask_for_vis, alpha=alpha_blend,
                                          clicks_list=self.clicker.clicks_list, radius=click_radius)
