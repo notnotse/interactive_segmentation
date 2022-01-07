@@ -13,4 +13,3 @@ from isegm.utils.log import logger
 from isegm.model import initializer
 
 from isegm.model.is_hrnet_model import HRNetModel
-from isegm.model.is_deeplab_model import DeeplabModel
