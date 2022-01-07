@@ -2,6 +2,7 @@ from time import time
 
 import numpy as np
 import torch
+from tqdm.autonotebook import get_ipython
 
 from isegm.inference import utils
 from isegm.inference.clicker import Clicker
