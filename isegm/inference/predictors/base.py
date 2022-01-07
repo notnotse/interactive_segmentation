@@ -1,9 +1,8 @@
 import torch
 import torch.nn.functional as F
 from torchvision import transforms
-from torchvision.transforms.functional import to_pil_image
 
-from isegm.inference.transforms import AddHorizontalFlip, SigmoidForPred, LimitLongestSide, ZoomOut
+from isegm.inference.transforms import SigmoidForPred
 
 
 class BasePredictor(object):
@@ -29,14 +28,15 @@ class BasePredictor(object):
             self.net = model
 
         self.to_tensor = transforms.ToTensor()
-
-        self.transforms = [zoom_in] if zoom_in is not None else []
-        if max_size is not None:
-            self.transforms.append(LimitLongestSide(max_size=max_size))
+        self.transforms = []
+        # TODO: What does Sigmoid and Horizontal do?
+        # if max_size is not None:
+        #   self.transforms.append(LimitLongestSide(max_size=max_size))
         self.transforms.append(SigmoidForPred())
-        if with_flip:
-            self.transforms.append(AddHorizontalFlip())
+        #if with_flip:
+            #self.transforms.append(AddHorizontalFlip())
 
+    # TODO: This happens after loading image by button.
     def set_input_image(self, image):
         image_nd = self.to_tensor(image)
         for transform in self.transforms:
@@ -48,41 +48,21 @@ class BasePredictor(object):
 
     def get_prediction(self, clicker, prev_mask=None):
         clicks_list = clicker.get_clicks()
-
-        if self.click_models is not None:
-            model_indx = min(clicker.click_indx_offset + len(clicks_list), len(self.click_models)) - 1
-            if model_indx != self.model_indx:
-                self.model_indx = model_indx
-                self.net = self.click_models[model_indx]
-
         input_image = self.original_image
+
         if prev_mask is None:
             prev_mask = self.prev_prediction
         if hasattr(self.net, 'with_prev_mask') and self.net.with_prev_mask:
             input_image = torch.cat((input_image, prev_mask), dim=1)
 
-        # ZoomIN
-        # LimitLongestSide - Scales original image down to max_size if its bigger than max_size. (800 pix)
-        image_nd, clicks_lists, is_image_changed = self.apply_transforms(
-            input_image, [clicks_list]
-        )
-        # image_nd 800x800
-
-        pil = to_pil_image(image_nd[0])
-        pil.show()
+        image_nd, clicks_lists, is_image_changed = self.apply_transforms(input_image, [clicks_list])
 
         pred_logits = self._get_prediction(image_nd, clicks_lists, is_image_changed)
         prediction = F.interpolate(pred_logits, mode='bilinear', align_corners=True,
                                    size=image_nd.size()[2:])
-        # SigmoidForPred
-        # AddHorizontalFlip
-        # FELET ÄR HÄR!!!!!!!!!!!!!!!!!
-        # CORRECT: ZoomOout torch.Size([1, 1, 1500, 1500])
         for t in reversed(self.transforms):
             prediction = t.inv_transform(prediction)
 
-        # if self.zoom_out is not None and self.zoom_out.check_possible_recalculation():
-        #    return self.get_prediction(clicker)
         self.prev_prediction = prediction
         return prediction.cpu().numpy()[0, 0]
 
@@ -135,4 +115,3 @@ class BasePredictor(object):
     def set_states(self, states):
         self._set_transform_states(states['transform_states'])
         self.prev_prediction = states['prev_prediction']
-
