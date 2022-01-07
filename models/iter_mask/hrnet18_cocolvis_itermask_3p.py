@@ -1,8 +1,6 @@
 from isegm.data.datasets.mask import MaskDataset
 from isegm.utils.exp_imports.default import *
 
-MODEL_NAME = 'cocolvis_hrnet18'
-
 
 def main(cfg):
     model, model_cfg = init_model(cfg)
@@ -37,20 +35,17 @@ def train(model, cfg, model_cfg):
     loss_cfg.instance_aux_loss_weight = 0.4
 
     train_augmentator = Compose([
-        UniformRandomResize(scale_range=(0.75, 1.40)),
-        HorizontalFlip(),
-        PadIfNeeded(min_height=crop_size[0], min_width=crop_size[1], border_mode=0),
-        RandomCrop(*crop_size),
-        RandomBrightnessContrast(brightness_limit=(-0.25, 0.25), contrast_limit=(-0.15, 0.4), p=0.75),
-        RGBShift(r_shift_limit=10, g_shift_limit=10, b_shift_limit=10, p=0.75)
-    ], p=1.0)
+        HorizontalFlip(p=0.5),
+        ShiftScaleRotate(scale_limit=(0.0, 0.2), border_mode=cv2.BORDER_CONSTANT, p=0.5),
+        Transpose(),
+        RandomBrightnessContrast(p=0.5, brightness_limit=(0.0, 0.1), contrast_limit=(0.0, 0.15)),
+        RGBShift(r_shift_limit=15, g_shift_limit=15, b_shift_limit=15, p=0.5),
+        Sharpen(p=0.5),
+        HueSaturationValue(p=0.5)
+    ])
 
-    val_augmentator = Compose([
-        PadIfNeeded(min_height=crop_size[0], min_width=crop_size[1], border_mode=0),
-        RandomCrop(*crop_size)
-    ], p=1.0)
-
-    points_sampler = MultiPointSampler(model_cfg.num_max_points, prob_gamma=0.80,
+    points_sampler = MultiPointSampler(model_cfg.num_max_points,
+                                       prob_gamma=0.80,
                                        merge_objects_prob=0.15,
                                        max_num_merged_objects=2)
     """
@@ -64,7 +59,10 @@ def train(model, cfg, model_cfg):
         epoch_len=30000,
         stuff_prob=0.30
     )
-
+    val_augmentator = Compose([
+        PadIfNeeded(min_height=crop_size[0], min_width=crop_size[1], border_mode=0),
+        RandomCrop(*crop_size)
+    ], p=1.0)
     valset = CocoLvisDataset(
         cfg.LVIS_v1_PATH,
         split='val',
@@ -77,15 +75,13 @@ def train(model, cfg, model_cfg):
 
     trainset = MaskDataset(
         dataset_path=cfg.MASK_PATH_TRAIN,
-        min_object_area=1000,
-        augmentator=train_augmentator,
-        epoch_len=30000,)
+        min_object_area=500,
+        points_sampler=points_sampler,
+        augmentator=train_augmentator)
 
     valset = MaskDataset(dataset_path=cfg.MASK_PATH_VAL,
-                         augmentator=val_augmentator,
-                         min_object_area=1000,
-                         points_sampler=points_sampler,
-                         epoch_len=2000)
+                         min_object_area=500,
+                         points_sampler=points_sampler)
 
     optimizer_params = {
         'lr': 5e-4, 'betas': (0.9, 0.999), 'eps': 1e-8
@@ -103,4 +99,5 @@ def train(model, cfg, model_cfg):
                         metrics=[AdaptiveIoU()],
                         max_interactive_points=model_cfg.num_max_points,
                         max_num_next_clicks=3)
-    trainer.run(num_epochs=230)
+
+    trainer.run(num_epochs=1000)
