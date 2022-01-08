@@ -36,8 +36,9 @@ def train(model, cfg, model_cfg):
 
     train_augmentator = Compose([
         HorizontalFlip(p=0.5),
-        ShiftScaleRotate(scale_limit=(0.0, 0.2), border_mode=cv2.BORDER_CONSTANT, p=0.5),
+        ShiftScaleRotate(scale_limit=(0.0, 0.2), border_mode=cv2.BORDER_CONSTANT, rotate_limit=(45, 45), p=1),
         Transpose(),
+        Resize(450, 450),
         RandomBrightnessContrast(p=0.5, brightness_limit=(0.0, 0.1), contrast_limit=(0.0, 0.15)),
         RGBShift(r_shift_limit=15, g_shift_limit=15, b_shift_limit=15, p=0.5),
         Sharpen(p=0.5),
