@@ -1,5 +1,7 @@
 # Interactive Segmentation
 
+Link to the original repo: https://github.com/saic-vul/ritm_interactive_segmentation
+
 ### Changes made
 
 Some changes have been made to this repository to be better suited for mask creation
@@ -22,7 +24,7 @@ leave some margin around the object.
 ###### Image: Still works great on first click, even if the cropping is "bad".
 
 <p align="center">
-  <img src="./assets/img/crop.png" alt="drawing", width="600"/>
+  <img src="./assets/img/crop.png" alt="drawing", width="300"/>
 </p>
 
 By having pre-cropped images, you save a lot of time and prediction cycles and
@@ -41,8 +43,8 @@ But they are not using BRS in this new repo:
 Recent works on click-based interactive segmentation have demonstrated state-of-the-art results
 by using various inference-time optimization schemes. These methods are considerably more
 computationally expensive compared to feedforward approaches, as they require performing
-backward passes through a network during inference and are hard to deploy on mobile frameworks that usually support only forward passes. 
-In this paper, we extensively evaluate various
+backward passes through a network during inference and are hard to deploy on mobile frameworks 
+that usually support only forward passes. In this paper, we extensively evaluate various
 design choices for interactive segmentation and discover that new state-of-the-art results can be
 obtained without any additional optimization schemes. Thus, we propose a simple feedforward
 model for click-based interactive segmentation that employs the segmentation masks from previous steps.
@@ -126,8 +128,9 @@ How to save annotations in cvat:
 How to convert into trainable data:
 * Extract zip-file.
 * Place contents in a folder, let's say `data`.
-* Run the `create_train_data.py` as script with the following inputs: `data dir, save dir.py`. You can change the validation split in the code if you like. Default is 0.2.
+* Run the `create_train_data.py` as script with the following inputs: `data_dir, save_dir`. You can change the validation split in the code if you like. Default is 0.2.
 * Done!
+* See `interactive_segmentation.ipynb` for details on where to place the data for training with **Google Colab**.
 
 ## Interactive demo
 This repo also comes with an interactive demo.
@@ -140,7 +143,8 @@ See the link below if you want to see how the original look like.
 
 Link to the original repo: https://github.com/saic-vul/ritm_interactive_segmentation
 
-#Original documentation below:
+
+##Original documentation below:
 
 ## Reviving Iterative Training with Mask Guidance for Interactive Segmentation 
 
