@@ -59,22 +59,12 @@ class InteractiveController:
 
         click = clicker.Click(is_positive=is_positive, coords=(y, x))
         self.clicker.add_click(click)
-        # TODO: self._init_mask seems to be always None.
-        pred = self.predictor.get_prediction(self.clicker, prev_mask=self._init_mask)
 
-        #result_frame = np.zeros(self.image_shape)
-        #left, top = pred_location
-        #result_frame[top:top+pred.shape[0], left:left+pred.shape[1]] = pred
-        #pred = result_frame
-        #for i, a in enumerate(result_frame):
-        #    if str(np.average(a)) != "0.0":
-        #        print(i, np.average(a), " of ", len(pred))
+        pred = self.predictor.get_prediction(self.clicker, prev_mask=self._init_mask)
 
         if self._init_mask is not None and len(self.clicker) == 1:
             print("self._init_mask is not None and len(self.clicker) == 1:")
             pred = self.predictor.get_prediction(self.clicker, prev_mask=self._init_mask)
-
-        # TODO: print(pred.shape) - 1500 x 1500 No objids, just a lot of numbers.
 
         torch.cuda.empty_cache()
 
