@@ -1,3 +1,143 @@
+# Interactive Segmentation
+
+### Changes made
+
+Some changes have been made to this repository to be better suited for mask creation
+on images where the image itself is not much larger than the object in the image.
+
+The prediction in the original repo works like this:
+* Run prediction on whole image -> Create mask.
+* If negative clicks are added so that the image can be cropped to the mask -> Crop image -> Run prediction.
+* Prediction image is now smaller, and it will now be much easier to further improve the mask.
+* Repeat until the user finishes the mask.
+
+The above logic is great for being able to apply a mask to anything in any image.
+But since running a prediction on large images is slow, it will make for a bad user 
+experience if you want to be able to create many masks fast.
+
+Therefore, it makes much more sense to run the prediction on already cropped images.
+The images don't have to cropped tight to the object in the image, as long as you
+leave some margin around the object.
+
+###### Image: Still works great on first click, even if the cropping is "bad".
+<p align="center">
+  <img src="./assets/img/crop.png" alt="drawing", width="600"/>
+</p>
+
+By having pre-cropped images, you save a lot of time and prediction cycles and
+can achieve higher mask/second throughput. Especially if you already know that your
+dataset will consist of images where the object you want to mask ALWAYS are
+much smaller than the image itself. For example, trees in aerial footage.
+
+### Changes made to prediction
+I've only been using the `isegm/inference/predictors/BasePredictor.`
+Changes were made to this repo by the original creators.
+Original: https://github.com/saic-vul/fbrs_interactive_segmentation
+Where they used f-BRS (feature backpropagating refinement scheme).
+But they are not using BRS in this new repo:
+
+`Recent works on click-based interactive segmentation have demonstrated state-of-the-art results
+by using various inference-time optimization schemes. These methods are considerably more
+computationally expensive compared to feedforward approaches, as they require performing
+backward passes through a network during inference and are hard to deploy on mobile frameworks that usually support only forward passes. 
+In this paper, we extensively evaluate various
+design choices for interactive segmentation and discover that new state-of-the-art results can be
+obtained without any additional optimization schemes. Thus, we propose a simple feedforward
+model for click-based interactive segmentation that employs the segmentation masks from previous steps.`
+
+### Changes made that effects training
+
+### Model
+The model that's been used for this project is:
+`models/iter_mask/hrnet18_cocolvis_itermask_3p.py`. 
+<br>
+I've changed the augmentation to the following:
+
+```.bash
+train_augmentator = Compose([
+        HorizontalFlip(p=0.5),
+        ShiftScaleRotate(scale_limit=(0.0, 0.2), border_mode=cv2.BORDER_CONSTANT, rotate_limit=(45, 45), p=1),
+        Transpose(),
+        Resize(450, 450),
+        RandomBrightnessContrast(p=0.5, brightness_limit=(0.0, 0.1), contrast_limit=(0.0, 0.15)),
+        RGBShift(r_shift_limit=15, g_shift_limit=15, b_shift_limit=15, p=0.5),
+        Sharpen(p=0.5),
+        HueSaturationValue(p=0.5)
+    ])
+
+    val_augmentator = Compose([
+        PadIfNeeded(min_height=crop_size[0], min_width=crop_size[1], border_mode=0),
+        RandomCrop(*crop_size)
+    ], p=1.0)
+```
+You might want to change the model and the augmentation to achieve even better results.
+
+### Training
+
+The **interactive_segmentation.ipynb** training script is currently using `models/iter_mask/hrnet18_cocolvis_itermask_3p.py`.
+<br>
+Please study the github links in the script used to fetch the repo and its training data, and modify it to your own.
+You could also modify it to use data that you upload yourself, but it's significantly slower than
+getting it through github.
+
+### Augmentation
+In `augtester.py` you'll find a simple loop that you can use for
+trying different image augmentation methods.
+
+### Creating more training data
+#### How should I annotate?
+###### Image: Good example vs. bad example
+<p align="center">
+  <img src="./assets/img/goodbad.png" alt="drawing", width="600"/>
+</p>
+I noticed an increase in first-click accuracy (good mask on first click) when I started
+being more accurate when annotating. If you want to continue to build on the dataset, I would 
+strongly suggest that all objects added from now on are of high quality.
+
+Annotating objects with intricate contours such as trees It's a very tedious, 
+but it's made easier by using [https://cvat.org/](https://cvat.org/) and its 
+smart scissor tool.
+
+###### Smart scissor tool
+<p align="center">
+  <img src="./assets/img/tool.png" alt="drawing", width="600"/>
+</p>
+
+How to use cvat:
+* Create project.
+* Create task.
+* Add images.
+* Start annotating.
+
+You can annotate how many trees/objects that you want to in an image.
+The dataset-creation script will crop and create each tree/object into training data, 
+so there's no need to completely fill an entire image.
+
+How to save annotations in cvat:
+* Menu
+* Export task dataset
+* Export format: COCO 1.0
+* Save the zip-file.
+
+How to convert into trainable data:
+* Extract zip-file.
+* Place contents in a folder, let's say `data`.
+* Run the `create_train_data.py` as script with the following inputs: `data dir, save dir.py`. You can change the validation split in the code if you like. Default is 0.2.
+* Done!
+
+## Interactive demo
+This repo also comes with an interactive demo.
+For testing purposes, some functions might not work in it as they do in the original.
+If you want to try all the different model selections etc, please use the original repo.
+
+Some files and logic has been removed from this modified repo.
+See the link below if you want to see how the original look like.
+<br>
+
+Link to the original repo: https://github.com/saic-vul/ritm_interactive_segmentation
+
+#Original documentation below:
+
 ## Reviving Iterative Training with Mask Guidance for Interactive Segmentation 
 
 <p align="center">
