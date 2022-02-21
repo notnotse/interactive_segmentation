@@ -20,6 +20,7 @@ The images don't have to cropped tight to the object in the image, as long as yo
 leave some margin around the object.
 
 ###### Image: Still works great on first click, even if the cropping is "bad".
+
 <p align="center">
   <img src="./assets/img/crop.png" alt="drawing", width="600"/>
 </p>
@@ -36,14 +37,17 @@ Original: https://github.com/saic-vul/fbrs_interactive_segmentation
 Where they used f-BRS (feature backpropagating refinement scheme).
 But they are not using BRS in this new repo:
 
-`Recent works on click-based interactive segmentation have demonstrated state-of-the-art results
+```
+Recent works on click-based interactive segmentation have demonstrated state-of-the-art results
 by using various inference-time optimization schemes. These methods are considerably more
 computationally expensive compared to feedforward approaches, as they require performing
 backward passes through a network during inference and are hard to deploy on mobile frameworks that usually support only forward passes. 
 In this paper, we extensively evaluate various
 design choices for interactive segmentation and discover that new state-of-the-art results can be
 obtained without any additional optimization schemes. Thus, we propose a simple feedforward
-model for click-based interactive segmentation that employs the segmentation masks from previous steps.`
+model for click-based interactive segmentation that employs the segmentation masks from previous steps.
+```
+
 
 ### Changes made that effects training
 
