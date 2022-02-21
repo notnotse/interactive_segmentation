@@ -29,14 +29,8 @@ class BasePredictor(object):
 
         self.to_tensor = transforms.ToTensor()
         self.transforms = []
-        # TODO: What does Sigmoid and Horizontal do?
-        # if max_size is not None:
-        #   self.transforms.append(LimitLongestSide(max_size=max_size))
         self.transforms.append(SigmoidForPred())
-        #if with_flip:
-            #self.transforms.append(AddHorizontalFlip())
 
-    # TODO: This happens after loading image by button.
     def set_input_image(self, image):
         image_nd = self.to_tensor(image)
         for transform in self.transforms:
