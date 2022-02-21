@@ -38,19 +38,13 @@ class InteractiveDemoApp(ttk.Frame):
         master.bind('<space>', lambda event: self.controller.finish_object())
         master.bind('a', lambda event: self.controller.partially_finish_object())
 
-        #self.state['zoomin_params']['skip_clicks'].trace(mode='w', callback=self._reset_predictor)
         self.state['zoomin_params']['target_size'].trace(mode='w', callback=self._reset_predictor)
         self.state['zoomin_params']['expansion_ratio'].trace(mode='w', callback=self._reset_predictor)
         self.state['predictor_params']['net_clicks_limit'].trace(mode='w', callback=self._change_brs_mode)
         self.state['lbfgs_max_iters'].trace(mode='w', callback=self._change_brs_mode)
         self._change_brs_mode()
 
-        self.load_img()
-
-    def load_img(self):
-        # TODO: ADDING TO LOAD IMG
-
-        filename = "C:/Users/Jonas/Desktop/bild2.jpg"
+    def load_img(self, filename):
         image = cv2.cvtColor(cv2.imread(filename), cv2.COLOR_BGR2RGB)
         self.controller.set_image(image)
         self.save_mask_btn.configure(state=tk.NORMAL)
